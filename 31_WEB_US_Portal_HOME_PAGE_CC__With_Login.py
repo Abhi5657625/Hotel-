@@ -1,0 +1,1158 @@
+"""
+EaseMyTrip US Portal – Hotel Booking Automation (Credit Card, With Login)
+URL  : https://www.easemytrip.us/
+Flow : Launch site → click Hotels → login → search Dubai (2 adults) →
+       set dates → search → listing → View More → View Rooms →
+       Book Now → traveller details → Continue Booking →
+       Credit Card payment → OTP page → capture Booking ID
+"""
+
+import os
+import re
+import sys
+import time
+
+# Force UTF-8 output on Windows (avoids cp1252 emoji encoding errors)
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+PORTAL_URL     = "https://www.easemytrip.us/"
+HOTELS_URL     = "https://www.easemytrip.us/hotels/"
+LOGIN_EMAIL    = "abhijeet.tiwary@easemytrip.com"
+LOGIN_PASSWORD = "Abhijeet9876"
+
+SEARCH_CITY    = "Delhi"
+CHECKIN_STR    = "30/05/2026"
+CHECKOUT_STR   = "31/05/2026"
+CHECKIN_DAY    = "30"
+CHECKOUT_DAY   = "31"
+ADULTS         = 2
+ROOMS          = 1
+
+FIRST_NAME     = "abhijeet"
+LAST_NAME      = "tiwary"
+EMAIL          = "abhijeet.tiwary@easemytrip.com"
+PHONE          = "8707040722"
+PAN_CARD       = "EJDHU3444J"
+
+CARD_NUMBER    = "4992000333871277"
+CARD_MM        = "07"
+CARD_YY        = "30"
+CARD_CVV       = "539"
+CARD_NAME      = "Nishant pitti"
+
+SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def save_screenshot(page, name):
+    try:
+        path = os.path.join(SCREENSHOT_DIR, f"{name}.png")
+        page.screenshot(path=path)
+        print(f"📸 Screenshot: {path}")
+    except Exception:
+        pass
+
+
+def dom_classes(page):
+    """Return all unique CSS class tokens present on the page."""
+    try:
+        raw = page.evaluate("""(function(){
+            var s = new Set();
+            document.querySelectorAll('*').forEach(function(el) {
+                (el.getAttribute('class') || '').split(' ').forEach(function(c) {
+                    if (c.length > 2) s.add(c);
+                });
+            });
+            return Array.from(s).join(' ');
+        })()""")
+        return raw.split()
+    except Exception:
+        return []
+
+
+def click_first_visible(page, selectors, label):
+    """Try each selector; click first visible match. Returns selector used or None."""
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                el.click()
+                print(f"✅ {label} clicked via: {sel}")
+                return sel
+        except Exception:
+            continue
+    return None
+
+
+# ── Step 1: Launch site and click Hotels tab ───────────────────────────────────
+def step_open_hotels(page):
+    print("\n🌐 Launching https://www.easemytrip.us/ ...")
+    page.goto(PORTAL_URL, wait_until="domcontentloaded")
+    page.wait_for_timeout(500)
+
+    print("🏨 Clicking Hotels tab...")
+    clicked = click_first_visible(page, [
+        'a[href*="/hotels"]',
+        'a:has-text("Hotels")',
+        ':text("Hotels")',
+        '#homepagemenuUL li:nth-child(2) a',
+    ], "Hotels tab")
+
+    if not clicked:
+        print("⚠️ Hotels tab not found — navigating directly to /hotels/")
+        page.goto(HOTELS_URL, wait_until="domcontentloaded")
+    else:
+        try:
+            page.wait_for_url("**/hotels**", timeout=10000)
+        except Exception:
+            pass
+
+    # If not already on hotels page, navigate directly
+    if "/hotels" not in page.url:
+        print("⚠️ Not on hotels page after tab click — navigating directly to /hotels/")
+        page.goto(HOTELS_URL, wait_until="domcontentloaded")
+
+    try:
+        page.locator('.htl_location, #txtCity, [placeholder*="ity"], [placeholder*="estination"]').first.wait_for(state="attached", timeout=15000)
+        print(f"✅ Hotels page loaded. URL: {page.url}")
+    except Exception:
+        raise RuntimeError("❌ Hotels page did not load after clicking Hotels tab.")
+
+
+# ── Step 2: Login ──────────────────────────────────────────────────────────────
+def step_login(page):
+    print("\n🔐 Logging in...")
+
+    for sel in ['a._btnclick', '[class*="_btnclick"]', 'a:has-text("Login")']:
+        try:
+            page.locator(sel).first.hover()
+            page.wait_for_timeout(150)
+            print(f"✅ Hovered login trigger via: {sel}")
+            break
+        except Exception:
+            continue
+
+    for sel in [':text("Customer Login")', 'a:has-text("Customer Login")', ':text("Sign In")']:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                el.click(force=True)
+                print(f"✅ Clicked login option via: {sel}")
+                break
+        except Exception:
+            continue
+
+    page.wait_for_timeout(300)
+
+    try:
+        page.locator('#txtEmail').fill(LOGIN_EMAIL)
+        page.locator('#txtEmail').press('Enter')
+        print("✅ Email entered + Enter pressed")
+    except Exception as e:
+        raise RuntimeError(f"❌ Could not fill email: {e}")
+
+    for sel in ['button:has-text("Continue")', ':text("Continue")', '#btnContinue']:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                try:
+                    with page.expect_navigation(timeout=8000, wait_until="domcontentloaded"):
+                        el.click()
+                except Exception:
+                    pass  # no navigation — inline modal
+                print("✅ Continue clicked")
+                break
+        except Exception:
+            continue
+
+    # Wait for password field — try longer and with more selectors
+    password_filled = False
+    page.wait_for_timeout(500)   # give Angular/JS time to render password step
+    for sel in ['#txtEmail2', '#txtPassword', 'input[type="password"]',
+                '[placeholder*="Password"]', '[placeholder*="password"]',
+                '[name*="assword"]', '[id*="assword"]']:
+        try:
+            el = page.locator(sel).first
+            el.wait_for(state="visible", timeout=12000)
+            el.fill(LOGIN_PASSWORD)
+            print("✅ Password entered")
+            password_filled = True
+            break
+        except Exception:
+            continue
+    if not password_filled:
+        # Dump all inputs to understand what state the page is in
+        try:
+            inputs = page.evaluate("""() => Array.from(document.querySelectorAll('input')).map(el => ({
+                id: el.id, name: el.name, type: el.type, ph: el.placeholder,
+                vis: el.offsetParent !== null, display: getComputedStyle(el).display
+            }))""")
+            print(f"🔍 Inputs after Continue: {inputs}")
+            print(f"🔍 URL: {page.url}")
+            print(f"🔍 Page title: {page.title()}")
+        except Exception as ex:
+            print(f"⚠️ Dump failed: {ex}")
+        raise RuntimeError("❌ Password field not found after Continue")
+
+    for sel in [
+        'xpath=/html/body/div[1]/div[1]/div/div/div[2]/div[3]/div/div[5]/input',
+        'button:has-text("Login")', ':text("Login")', '#btnLogin',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                try:
+                    with page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
+                        el.click()
+                except Exception:
+                    pass  # no navigation — inline flow
+                print("✅ Login clicked")
+                break
+        except Exception:
+            continue
+
+    try:
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    print(f"✅ Login done. URL: {page.url}")
+
+
+# ── Step 3: Navigate to /hotels/ after login ───────────────────────────────────
+def step_goto_hotels_after_login(page):
+    print(f"\n🏨 Navigating to {HOTELS_URL} after login...")
+    page.goto(HOTELS_URL, wait_until="domcontentloaded")
+    try:
+        page.locator('.htl_location').first.wait_for(state="visible", timeout=15000)
+        print("✅ Hotels search form ready")
+    except Exception:
+        try:
+            page.locator('#txtCity').wait_for(state="attached", timeout=8000)
+        except Exception:
+            raise RuntimeError("❌ Hotels form did not load after login.")
+    page.wait_for_timeout(300)
+
+
+# ── Step 4: Search city ────────────────────────────────────────────────────────
+def step_search_city(page):
+    print(f"\n🏙️ Searching for city: {SEARCH_CITY}...")
+
+    try:
+        loc = page.locator('.htl_location').first
+        if loc.is_visible():
+            loc.click()
+            page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+    page.evaluate("""
+        var el = document.getElementById('txtCity');
+        if (el) {
+            el.style.display = 'block';
+            el.style.visibility = 'visible';
+            el.focus();
+        }
+    """)
+    page.wait_for_timeout(200)
+
+    try:
+        city_input = page.locator('#txtCity').first
+        city_input.fill("")
+        city_input.type("delhi", delay=120)
+        print("✅ Typed 'delhi' into city input")
+    except Exception as e:
+        raise RuntimeError(f"❌ Could not type into city input: {e}")
+
+    try:
+        page.locator('#ui-id-1 li.ui-menu-item').first.wait_for(state="visible", timeout=10000)
+        print("✅ Autocomplete suggestions appeared")
+    except Exception:
+        raise RuntimeError("❌ City autocomplete did not appear.")
+
+    items = page.locator('#ui-id-1 li.ui-menu-item').all()
+    chosen = None
+    for item in items[:6]:
+        try:
+            text = item.inner_text().lower()
+            if "delhi" in text or "new delhi" in text or "india" in text:
+                item.click()
+                chosen = item.inner_text().split("\n")[0].strip()
+                print(f"✅ Selected city: {chosen}")
+                break
+        except Exception:
+            continue
+
+    if not chosen:
+        try:
+            items[0].click()
+            chosen = items[0].inner_text().split("\n")[0].strip()
+            print(f"✅ Selected city (fallback): {chosen}")
+        except Exception:
+            raise RuntimeError("❌ Could not select any city suggestion.")
+
+    page.wait_for_timeout(500)
+    return chosen
+
+
+# ── Step 5: Set check-in / check-out dates ─────────────────────────────────────
+def step_set_dates(page):
+    print(f"\n📅 Setting dates: {CHECKIN_STR} → {CHECKOUT_STR}...")
+
+    opened = False
+    for sel in ['#htl_dates', '#htlcheckIn', '.checkIn', '[id*="htl_dates"]']:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible():
+                el.click()
+                page.wait_for_timeout(200)
+                opened = True
+                print(f"✅ Datepicker opened via: {sel}")
+                break
+        except Exception:
+            continue
+
+    if not opened:
+        page.evaluate("var el=document.getElementById('htl_dates'); if(el) el.click();")
+        page.wait_for_timeout(600)
+
+    try:
+        page.locator('#ui-datepicker-div').wait_for(state="visible", timeout=5000)
+        ci = page.locator(f'#ui-datepicker-div td:not(.ui-datepicker-other-month) a:text-is("{CHECKIN_DAY}")').first
+        ci.wait_for(state="attached", timeout=4000)
+        ci.click(force=True)
+        page.wait_for_timeout(150)
+        print(f"✅ Check-in day {CHECKIN_DAY} selected")
+
+        co = page.locator(f'#ui-datepicker-div td:not(.ui-datepicker-other-month) a:text-is("{CHECKOUT_DAY}")').first
+        co.wait_for(state="attached", timeout=4000)
+        co.click(force=True)
+        page.wait_for_timeout(150)
+        print(f"✅ Check-out day {CHECKOUT_DAY} selected")
+        return
+    except Exception as e:
+        print(f"⚠️ Calendar click failed ({e}) — injecting via JS")
+
+    page.evaluate(f"""
+        (function(ci, co) {{
+            var ciEl = document.getElementById('txtCheckInDate');
+            var coEl = document.getElementById('txtCheckOutDate');
+            if (ciEl) {{ ciEl.value = ci; ciEl.dispatchEvent(new Event('change', {{bubbles:true}})); }}
+            if (coEl) {{ coEl.value = co; coEl.dispatchEvent(new Event('change', {{bubbles:true}})); }}
+            if (typeof $ !== 'undefined') {{
+                var p = ci.split('/');
+                var q = co.split('/');
+                try {{
+                    $('#txtCheckInDate').datepicker('setDate', new Date(p[2], parseInt(p[1])-1, p[0]));
+                    $('#txtCheckOutDate').datepicker('setDate', new Date(q[2], parseInt(q[1])-1, q[0]));
+                }} catch(e) {{}}
+            }}
+        }})('{CHECKIN_STR}', '{CHECKOUT_STR}');
+    """)
+    page.wait_for_timeout(500)
+    print("✅ Dates injected via JS")
+
+
+# ── Step 6: Set 2 adults ───────────────────────────────────────────────────────
+def step_set_adults(page):
+    print(f"\n👥 Setting {ADULTS} adults...")
+
+    for sel in ['[class*="roomGuest"]', '#htl_rooms', '#htlRooms']:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                el.click()
+                page.wait_for_timeout(200)
+                print(f"✅ Rooms panel opened via: {sel}")
+                break
+        except Exception:
+            continue
+
+    for sel in ['[id*="adultPlus"]', '[id*="adult_plus"]',
+                '[class*="adult"] button:has-text("+")',
+                '[class*="adult"] [class*="plus"]']:
+        try:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible():
+                for _ in range(ADULTS - 1):
+                    btn.click()
+                    page.wait_for_timeout(200)
+                print(f"✅ Adult + clicked {ADULTS-1}x via: {sel}")
+                break
+        except Exception:
+            continue
+
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    page.wait_for_timeout(300)
+    print(f"✅ Guests set ({ADULTS} adults)")
+
+
+# ── Step 7: Click Search → listing page ───────────────────────────────────────
+def step_search(page):
+    print("\n🔍 Clicking Search...")
+
+    clicked = click_first_visible(page, [
+        'button:has-text("Search")', ':text("Search Hotels")',
+        '#btnSearch', '#btnHtlSearch', '[class*="btnsrch"]',
+        'button[type="submit"]', 'input[type="submit"]',
+    ], "Search button")
+
+    if not clicked:
+        try:
+            page.evaluate("HotelSearchOffline()")
+            print("✅ Search triggered via HotelSearchOffline()")
+        except Exception:
+            raise RuntimeError("❌ Could not trigger hotel search.")
+
+    try:
+        page.wait_for_url(lambda u: "hotel-new/search" in u, timeout=20000)
+        print(f"✅ Results URL: {page.url}")
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(3000)
+        if "hotel-new/search" not in page.url:
+            raise RuntimeError(f"❌ Search did not navigate to results. URL: {page.url}")
+
+    # Ensure pax=2 in URL
+    current = page.url
+    if "pax=" in current and f"pax={ADULTS}" not in current:
+        fixed = re.sub(r'pax=\d+', f'pax={ADULTS}', current)
+        page.goto(fixed, wait_until="domcontentloaded")
+        print(f"✅ URL updated to pax={ADULTS}: {page.url}")
+
+
+# ── Step 8: Verify hotel listings ─────────────────────────────────────────────
+def step_check_listings(page):
+    print("\n🔎 Checking hotel listings...")
+    # Wait for first listing card instead of slow networkidle
+    try:
+        page.locator('.listing-bx').first.wait_for(state="attached", timeout=25000)
+    except Exception:
+        pass
+
+    for sel in ['.listing-bx', '.htl_name', '.htl-nm', '.htlinfo',
+                '[class*="htlname"]', '[class*="hotel-name"]']:
+        count = page.locator(sel).count()
+        if count > 0:
+            print(f"✅ {count} hotel(s) found via: {sel}")
+            return
+
+    page_text = page.inner_text("body").lower()
+    for kw in ['no hotel', 'no result', '0 hotel']:
+        if kw in page_text:
+            raise RuntimeError(f"❌ No hotels found — page shows '{kw}'.")
+    raise RuntimeError("❌ No hotel listing cards detected.")
+
+
+# ── Step 9: Click View More (if present) ──────────────────────────────────────
+def step_view_more(page):
+    print("\n🔽 Looking for 'View More' button...")
+    page.evaluate("window.scrollBy(0, 300)")
+    page.wait_for_timeout(200)
+
+    clicked = click_first_visible(page, [
+        '.listing-bx a:has-text("View More")',
+        '.listing-bx button:has-text("View More")',
+        '.listing-footer a:has-text("View More")',
+        'a:has-text("View More")',
+        'button:has-text("View More")',
+        ':text("View More")',
+    ], "'View More'")
+
+    if not clicked:
+        print("ℹ️ No 'View More' button found — proceeding")
+
+
+# ── Step 10: Click View Rooms (opens new tab) ─────────────────────────────────
+def step_view_rooms(page):
+    print("\n🛏️ Clicking 'View Rooms'...")
+    # Wait for at least one View Rooms button to be visible before interacting
+    try:
+        page.locator('button:has-text("View Rooms"), a:has-text("View Rooms")').first.wait_for(
+            state="visible", timeout=15000
+        )
+    except Exception:
+        pass
+    page.evaluate("window.scrollBy(0, 300)")
+
+    for sel in [None,  # role-based first
+                '.listing-bx button:has-text("View Rooms")',
+                '.listing-bx a:has-text("View Rooms")',
+                '.listing-footer button',
+                '.listing-footer a',
+                'button:has-text("View Rooms")',
+                'a:has-text("View Rooms")']:
+        try:
+            if sel is None:
+                btn = page.get_by_role("button", name="View Rooms").first
+                if btn.count() == 0:
+                    continue
+            else:
+                btn = page.locator(sel).first
+                if btn.count() == 0 or not btn.is_visible():
+                    continue
+
+            with page.context.expect_page(timeout=12000) as np_info:
+                btn.click()
+            new_page = np_info.value
+            new_page.wait_for_load_state("domcontentloaded")
+            print(f"✅ 'View Rooms' clicked. New tab: {new_page.url}")
+            return new_page
+        except Exception:
+            continue
+
+    raise RuntimeError("❌ Could not click 'View Rooms' button.")
+
+
+# ── Step 11: Click Book Now ────────────────────────────────────────────────────
+def step_book_now(page):
+    print("\n📋 Clicking 'Book Now'...")
+    # Wait for Book Now button directly — avoids slow networkidle
+    try:
+        page.locator('a:has-text("Book Now"), button:has-text("Book Now")').first.wait_for(
+            state="visible", timeout=15000
+        )
+    except Exception:
+        pass
+
+    # Dump visible anchor/button text for diagnosis
+    try:
+        links = page.evaluate("""() => Array.from(document.querySelectorAll('a,button'))
+            .filter(el => el.offsetParent !== null)
+            .map(el => el.innerText.trim().slice(0, 40))
+            .filter(t => t.length > 0)
+        """)
+        print(f"🔍 Visible links/buttons: {links[:20]}")
+    except Exception:
+        pass
+
+    clicked = click_first_visible(page, [
+        'a:has-text("Book Now")', 'button:has-text("Book Now")',
+        ':text("Book Now")', ':text("BOOK NOW")',
+        'a:has-text("Book")', '[class*="book-now"]', '[class*="bookNow"]',
+        '[class*="bkbtn"]', '[class*="bookbtn"]',
+    ], "'Book Now'")
+
+    if not clicked:
+        # JS fallback — scroll + click first visible anchor containing "Book"
+        try:
+            result = page.evaluate("""() => {
+                var els = Array.from(document.querySelectorAll('a,button'));
+                var el = els.find(e => /book/i.test(e.innerText));
+                if (el) { el.scrollIntoView({block:'center'}); el.click(); return el.innerText.trim(); }
+                return null;
+            }""")
+            if result:
+                print(f"✅ 'Book Now' clicked via JS fallback: {result}")
+                page.wait_for_timeout(1500)
+                print(f"📄 URL: {page.url}")
+                return
+        except Exception:
+            pass
+        raise RuntimeError("❌ Could not find 'Book Now' button.")
+
+    page.wait_for_timeout(800)
+    print(f"📄 URL: {page.url}")
+
+
+# ── Step 12: Read Grand Total ─────────────────────────────────────────────────
+def step_read_grand_total(page, label=""):
+    tag = f" ({label})" if label else ""
+    print(f"\n💰 Reading Grand Total{tag}...")
+    page.wait_for_timeout(2000)   # allow Angular to render
+
+    def extract_nonzero_amount(text):
+        """Return first USD/numeric amount > 0 found in text, else None."""
+        for pat in [
+            r'(?:USD|US\$|\$)\s*(\d[\d,]*(?:\.\d+)?)',
+            r'(\d[\d,]*(?:\.\d+)?)\s*(?:USD|US\$|\$)',
+            r'(\d[\d,]+)',           # plain number fallback (must have comma or 4+ digits)
+        ]:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                raw = m.group(1).replace(',', '')
+                try:
+                    if float(raw) > 0:
+                        return m.group(0).strip()
+                except ValueError:
+                    continue
+        return None
+
+    # Priority: Angular fare elements used by EMT checkout
+    priority_selectors = [
+        '.fare .red.ng-binding', '.red.ng-binding',
+        '.fare-wrap .red', '.pymnt-bx-rgt7',
+        '.fare', '[class*="fare-wrap"]',
+    ]
+    for sel in priority_selectors:
+        try:
+            for el in page.locator(sel).all():
+                txt = el.inner_text().strip()
+                amt = extract_nonzero_amount(txt)
+                if amt:
+                    print(f"✅ Grand Total{tag} ({sel}): {amt}")
+                    return amt
+        except Exception:
+            continue
+
+    # Generic class/id selectors
+    for sel in ['[class*="grand-total"]', '[class*="grandTotal"]', '[class*="totalAmt"]',
+                '[class*="payable"]', '[id*="grandTotal"]', '[id*="totalAmt"]',
+                'td:has-text("Grand Total")', 'div:has-text("Grand Total")']:
+        try:
+            for el in page.locator(sel).all():
+                amt = extract_nonzero_amount(el.inner_text())
+                if amt:
+                    print(f"✅ Grand Total{tag} ({sel}): {amt}")
+                    return amt
+        except Exception:
+            continue
+
+    # Body-text fallback — search for "Total Fare" / "Grand Total" labels first
+    try:
+        body = page.inner_text("body")
+        for pat in [
+            r'Total\s*Fare\s*[:\s]*(?:USD|US\$|\$)?\s*(\d[\d,]*(?:\.\d+)?)',
+            r'Grand\s*Total\s*[:\s]*(?:USD|US\$|\$)?\s*(\d[\d,]*(?:\.\d+)?)',
+            r'(?:USD|US\$|\$)\s*(\d[\d,]*(?:\.\d+)?)',
+        ]:
+            m = re.search(pat, body, re.IGNORECASE)
+            if m:
+                raw = m.group(1).replace(',', '')
+                try:
+                    if float(raw) > 0:
+                        total = m.group(0).strip()
+                        print(f"✅ Grand Total{tag} (body): {total}")
+                        return total
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+
+    print(f"⚠️ Grand Total not found{tag}")
+    return "N/A"
+
+
+# ── Step 13: Fill traveller details ───────────────────────────────────────────
+def step_fill_traveller(page):
+    print("\n✍️ Filling traveller details...")
+    page.wait_for_timeout(300)
+
+    def fill(selectors, value, name):
+        for sel in selectors:
+            try:
+                el = page.locator(sel).first
+                if el.count() > 0 and el.is_visible():
+                    el.fill(value)
+                    print(f"✅ {name} filled")
+                    return
+            except Exception:
+                continue
+        print(f"⚠️ Could not fill {name}")
+
+    fill(['[name=txtFirstName]', '#txtFirstName', '[placeholder*="First"]',
+          '[placeholder*="first"]'], FIRST_NAME, "First name")
+    fill(['[name=txtLastName]', '#txtLastName', '[placeholder*="Last"]',
+          '[placeholder*="last"]'], LAST_NAME, "Last name")
+    fill(['[name=txtEmail]', '#txtEmailId', '[type="email"]',
+          '[placeholder*="Email"]', '[placeholder*="email"]'], EMAIL, "Email")
+    fill(['[name=txtMobile]', '#txtMobile', '[placeholder*="Mobile"]',
+          '[placeholder*="mobile"]', '[placeholder*="Phone"]',
+          '[placeholder*="phone"]'], PHONE, "Phone")
+    fill(['[name=txtPanNo]', '#txtPanNo', '[placeholder*="PAN"]',
+          '[placeholder*="Pan"]', '[placeholder*="pan"]',
+          '[name*="pan"]', '[id*="pan"]', '[id*="Pan"]'], PAN_CARD, "PAN card")
+
+
+# ── Step 14: Continue Booking ─────────────────────────────────────────────────
+def step_continue_booking(page):
+    print("\n🔘 Clicking 'Continue Booking'...")
+
+    # Find button first before clicking
+    btn = None
+    for sel in [
+        'button:has-text("Continue Booking")',
+        'a:has-text("Continue Booking")',
+        ':text("Continue Booking")',
+        ':text("Proceed to Payment")',
+        'button:has-text("Proceed")',
+        'button[type="submit"]',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                btn = el
+                print(f"✅ Found via: {sel}")
+                break
+        except Exception:
+            continue
+
+    if not btn:
+        raise RuntimeError("❌ Could not find 'Continue Booking' button.")
+
+    # Click while watching for new tab (payment gateway may open a new tab)
+    try:
+        with page.context.expect_page(timeout=8000) as new_page_info:
+            btn.click()
+        new_page = new_page_info.value
+        new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+        print(f"✅ 'Continue Booking' → new tab: {new_page.url}")
+        return new_page
+    except Exception:
+        # No new tab — inline SPA transition on same page
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
+        try:
+            print(f"📄 URL after Continue: {page.url}")
+        except Exception:
+            pass
+        return page
+
+
+# ── Step 15: Select Credit Card payment option ────────────────────────────────
+def step_select_credit_card(page):
+    print("\n💳 Selecting Credit/Debit Card payment...")
+    # Wait for payment panel to be ready instead of a blanket sleep
+    try:
+        page.locator('.card.PG, [class*="paymentBox"]').first.wait_for(state="visible", timeout=10000)
+    except Exception:
+        pass
+
+    try:
+        classes = dom_classes(page)
+        pay_cls = [c for c in classes if any(k in c.lower() for k in
+                   ('pay', 'card', 'credit', 'debit', 'pg', 'upi', 'net', 'wallet'))]
+        print(f"💳 Payment classes: {pay_cls[:30]}")
+    except Exception as e:
+        print(f"⚠️ Could not dump classes: {e}")
+
+    for sel in [
+        '.card.PG',
+        'text="Credit/Debit/ATM Cards"',
+        'text="Credit / Debit Card"',
+        'text="Credit/Debit Card"',
+        ':text("Credit Card")',
+        ':text("Debit Card")',
+        ':text("Credit/Debit")',
+        '[class*="card"][class*="PG"]',
+        '[class*="card-pay"]', '[class*="creditCard"]',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                el.click()
+                print(f"✅ Credit Card option clicked via: {sel}")
+                # Wait for card input to appear instead of a blanket sleep
+                try:
+                    page.wait_for_selector(
+                        '[placeholder*="Card"],[id*="cardNo"],[name*="cardNo"],[id*="CardNo"],[id="card-input"]',
+                        state="visible", timeout=8000
+                    )
+                except Exception:
+                    page.wait_for_timeout(800)
+                print(f"📄 URL: {page.url}")
+
+                # Dump card form classes for debugging
+                try:
+                    classes2 = dom_classes(page)
+                    card_cls = [c for c in classes2 if any(k in c.lower() for k in
+                                ('card', 'cvv', 'expir', 'valid', 'holder', 'pan'))]
+                    print(f"💳 Card-form classes after click: {card_cls[:30]}")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            continue
+
+    raise RuntimeError("❌ Credit Card payment option not found.")
+
+
+# ── Step 16: Fill card details ────────────────────────────────────────────────
+def _get_payment_ctx(page):
+    try:
+        for frame in page.frames:
+            url = frame.url or ""
+            if url and "easemytrip" not in url and url != "about:blank":
+                if frame.locator('input').count() > 0:
+                    print(f"💳 Payment iframe: {url[:70]}")
+                    return frame
+    except Exception:
+        pass
+    return page
+
+
+def step_fill_card(page):
+    print("\n💳 Filling card details...")
+    ctx = _get_payment_ctx(page)
+
+    # Dump ALL input fields for diagnosis
+    try:
+        inputs_info = page.evaluate("""(function(){
+            return Array.from(document.querySelectorAll('input')).map(function(i){
+                return {id:i.id, name:i.name, ph:i.placeholder, type:i.type, vis:(i.offsetParent!==null)};
+            });
+        })()""")
+        visible_inputs = [x for x in inputs_info if x.get('vis')]
+        print(f"💳 Visible inputs: {visible_inputs[:15]}")
+    except Exception:
+        pass
+
+    def fill_by_attrs(id_fragments, ph_fragments, value, field_name):
+        # By placeholder
+        for ph in ph_fragments:
+            try:
+                el = ctx.get_by_placeholder(ph).first
+                if el.count() > 0 and el.is_visible():
+                    el.fill(value)
+                    print(f"✅ {field_name} filled via placeholder '{ph}'")
+                    return True
+            except Exception:
+                continue
+        # By id/name
+        for frag in id_fragments:
+            for attr in ('id', 'name'):
+                try:
+                    el = ctx.locator(f'[{attr}*="{frag}"]').first
+                    if el.count() > 0 and el.is_visible():
+                        el.fill(value)
+                        print(f"✅ {field_name} filled via [{attr}*='{frag}']")
+                        return True
+                except Exception:
+                    continue
+        print(f"⚠️ Could not fill {field_name}")
+        return False
+
+    fill_by_attrs(
+        ['cardNumber', 'cardNo', 'CardNo', 'CardNumber', 'pan', 'PAN', 'card-input'],
+        ['Card Number', 'card number', 'Enter Card Number', 'ENTER CARD NUMBER', 'Card No', 'PAN'],
+        CARD_NUMBER, "Card Number"
+    )
+    # Fill MM/YY as combined value (e.g. "07/30") — portal uses single MM/YY field
+    mmyy_filled = fill_by_attrs(
+        ['CCMM', 'expiry', 'expDate', 'cardExpiry', 'mmyy'],
+        ['MM/YY', 'MM / YY', 'Expiry', 'MMYY'],
+        f"{CARD_MM}/{CARD_YY}", "Expiry MM/YY"
+    )
+    if not mmyy_filled:
+        # Fallback: fill month and year separately
+        fill_by_attrs(
+            ['expMonth', 'ExpMonth', 'cardMM', 'cardMonth'],
+            ['MM', 'Month', 'Expiry Month', 'Exp Month'],
+            CARD_MM, "Expiry Month"
+        )
+        fill_by_attrs(
+            ['expYear', 'ExpYear', 'cardYY', 'cardYear'],
+            ['YY', 'Year', 'Expiry Year', 'YYYY', 'Exp Year'],
+            CARD_YY, "Expiry Year"
+        )
+    fill_by_attrs(
+        ['cvv', 'CVV', 'cvc', 'CVC', 'securityCode'],
+        ['CVV', 'cvv', 'CVV/CVC', 'Security Code'],
+        CARD_CVV, "CVV"
+    )
+    fill_by_attrs(
+        ['cardHolder', 'CardHolder', 'nameOnCard', 'NameOnCard', 'cardName'],
+        ['Card Holder Name', 'Name on Card', 'Cardholder Name', 'Name As on Card', 'Name'],
+        CARD_NAME, "Card Holder Name"
+    )
+
+
+# ── Step 17: Make Payment ─────────────────────────────────────────────────────
+def step_make_payment(page):
+    import time
+    print("\n🚀 Clicking 'Make Payment'...")
+
+    # Dump ALL pay-related elements (not filtered by visibility) for diagnosis
+    try:
+        btns = page.evaluate("""() => Array.from(document.querySelectorAll(
+            '[class*="payGT"],[class*="pay-btn"],[class*="paybtn"],button,[type="submit"],input[type="submit"]'))
+            .map(el => ({tag: el.tagName, text: el.innerText.trim().slice(0,60), cls: el.className.slice(0,80),
+                         vis: el.offsetParent !== null, display: getComputedStyle(el).display}))
+        """)
+        print(f"🔍 Pay elements: {btns[:20]}")
+    except Exception:
+        pass
+
+    # Primary: invoke CardValidationV1 via Angular $scope (proper AngularJS trigger)
+    try:
+        result = page.evaluate("""() => {
+            var el = document.querySelector('div.mk-pym');
+            if (el) {
+                try {
+                    var scope = angular.element(el).scope();
+                    scope.$apply(function() { scope.CardValidationV1(scope.engine); });
+                    return 'angular-scope';
+                } catch(e) {}
+                // Fallback: dispatch MouseEvent so Angular's event listener fires
+                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                return 'dispatch-click';
+            }
+            return null;
+        }""")
+        if result:
+            print(f"✅ Make Payment triggered via: {result}")
+            # Wait for navigation to OTP/3DS/bank page
+            try:
+                page.wait_for_url(
+                    lambda url: "otp" in url.lower() or "validation" in url.lower()
+                                or "3ds" in url.lower() or "secure" in url.lower()
+                                or "corporatevalidation" in url.lower()
+                                or "bank" in url.lower() or "stripe" in url.lower()
+                                or "hooks." in url.lower(),
+                    timeout=20000
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
+            print(f"📄 URL: {page.url}")
+            return
+    except Exception as e:
+        print(f"⚠️ Angular $scope click failed: {e}")
+
+    raise RuntimeError("❌ Could not trigger Make Payment.")
+
+
+# ── Step 18: OTP page ─────────────────────────────────────────────────────────
+def _find_frame_with_element(page, xpath, timeout=20000):
+    """Search main page and all nested frames for an element matching xpath.
+    Returns (frame, locator) or (None, None)."""
+    import time
+    deadline = time.time() + timeout / 1000
+    while time.time() < deadline:
+        frames = page.frames
+        print(f"🔍 Scanning {len(frames)} frame(s) for element...")
+        for frame in frames:
+            try:
+                loc = frame.locator(f'xpath={xpath}').first
+                if loc.count() > 0 and loc.is_visible():
+                    print(f"✅ Found in frame: {frame.url[:80]}")
+                    return frame, loc
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return None, None
+
+
+def step_otp_page(page, expected_total="N/A"):
+    print("\n🔑 Handling OTP page...")
+    # Only wait for navigation if still on checkout page
+    try:
+        if "checkout" in page.url.lower():
+            page.wait_for_url(
+                lambda url: "otp" in url.lower() or "validation" in url.lower()
+                            or "3ds" in url.lower() or "secure" in url.lower()
+                            or "corporatevalidation" in url.lower()
+                            or "bank" in url.lower() or "m2p" in url.lower()
+                            or "acsv2" in url.lower() or "emv" in url.lower()
+                            or "auth" in url.lower() or "acq" in url.lower(),
+                timeout=20000
+            )
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_timeout(2000)   # let Stripe 3DS iframe fully render
+        print(f"📄 URL: {page.url}")
+    except Exception as e:
+        print(f"⚠️ OTP page closed early: {e}")
+        return "N/A"
+
+    # ── Capture amount on OTP page (search main page + all frames) ────────────
+    otp_amount = "N/A"
+    amt_patterns = [
+        r'(?:USD|US\$|\$)\s*(\d[\d,]*(?:\.\d+)?)',
+        r'(\d[\d,]*(?:\.\d+)?)\s*(?:USD|US\$|\$)',
+        r'(?:INR|AED|GBP)\s*(\d[\d,]*(?:\.\d+)?)',
+    ]
+    frames_to_search = [page] + list(page.frames)
+    for ctx in frames_to_search:
+        try:
+            body_text = ctx.inner_text("body") if hasattr(ctx, 'inner_text') else ctx.locator("body").inner_text()
+            for pat in amt_patterns:
+                m = re.search(pat, body_text, re.IGNORECASE)
+                if m:
+                    raw = m.group(1).replace(',', '')
+                    if float(raw) > 0:
+                        otp_amount = m.group(0).strip()
+                        break
+            if otp_amount != "N/A":
+                break
+        except Exception:
+            continue
+
+    print(f"💰 Amount on OTP page: {otp_amount}")
+
+    # ── Compare with expected total ───────────────────────────────────────────
+    def norm(s):
+        return re.sub(r'[^\d]', '', s or '')
+
+    e_norm = norm(expected_total)
+    o_norm = norm(otp_amount)
+    if e_norm and o_norm:
+        if e_norm == o_norm:
+            print(f"[PASS] OTP amount MATCHES -- Expected: {expected_total}  |  OTP page: {otp_amount}")
+        else:
+            print(f"[FAIL] OTP amount MISMATCH -- Expected: {expected_total}  |  OTP page: {otp_amount}")
+
+    # ── Cancel Payment (search across all frames for XPath) ──────────────────
+    print("🚫 Clicking 'Cancel Payment'...")
+    cancel_frame, cancel_loc = _find_frame_with_element(
+        page, '/html/body/div[1]/div[1]/footer/div[2]', timeout=15000
+    )
+    if cancel_loc:
+        try:
+            cancel_loc.click()
+            print("✅ Cancel Payment clicked")
+            page.wait_for_timeout(1000)
+        except Exception as e:
+            print(f"⚠️ Cancel Payment click error: {e}")
+    else:
+        print("⚠️ Cancel Payment element not found in any frame")
+
+    # ── Yes button (search across all frames for XPath) ───────────────────────
+    print("🔘 Clicking 'Yes' to confirm cancellation...")
+    yes_frame, yes_loc = _find_frame_with_element(
+        page, '/html/body/div[1]/div[3]/div/div[2]/div/p[1]', timeout=10000
+    )
+    if yes_loc:
+        try:
+            yes_loc.click()
+            print("✅ Yes button clicked")
+            page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"⚠️ Yes button click error: {e}")
+    else:
+        # fallback: text-based search across frames
+        print("⚠️ Yes XPath not found — trying text fallback across frames...")
+        for frame in page.frames:
+            try:
+                for sel in ['p:has-text("Yes")', ':text("Yes")', 'button:has-text("Yes")', 'a:has-text("Yes")']:
+                    loc = frame.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.click()
+                        print(f"✅ Yes clicked via fallback '{sel}' in frame: {frame.url[:60]}")
+                        page.wait_for_timeout(2000)
+                        break
+            except Exception:
+                continue
+
+
+# ── Step 19: Capture Booking ID ───────────────────────────────────────────────
+def step_capture_booking_id(page):
+    print("\n🎫 Capturing Booking ID...")
+    # Wait for redirect back to EaseMyTrip (failed/TID page)
+    try:
+        page.wait_for_url(
+            lambda url: "easemytrip.us" in url.lower(),
+            timeout=15000
+        )
+        print(f"📄 Redirected to: {page.url}")
+    except Exception:
+        print(f"📄 URL: {page.url}")
+
+    page.wait_for_timeout(1000)
+
+    save_screenshot(page, "failed_tid_page")
+
+    try:
+        body = page.inner_text("body")
+        print(f"📋 Page text snippet: {body[:500]}")
+        for pat in [
+            r'Booking\s*(?:ID|No\.?|Number)[:\s#]*([A-Z0-9\-]+)',
+            r'Confirmation\s*(?:No\.?|Number)[:\s#]*([A-Z0-9\-]+)',
+            r'TID[:\s#]*([A-Z0-9\-]+)',
+            r'Transaction\s*(?:ID|No\.?)[:\s#]*([A-Z0-9\-]+)',
+            r'(?:EMT|HTL|BKG|TXN)[A-Z0-9\-]+',
+        ]:
+            m = re.search(pat, body, re.IGNORECASE)
+            if m:
+                bid = m.group(1) if m.lastindex else m.group(0)
+                print(f"🎉 Booking / TID: {bid}")
+                return bid
+    except Exception:
+        pass
+
+    print(f"⚠️ Booking ID not found. URL: {page.url}")
+    return None
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def automate_easemytrip_us():
+    print("=" * 65)
+    print("  EaseMyTrip US – Hotel Booking (CC, With Login)")
+    print("=" * 65)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        page = browser.new_page()
+        hotel_page = None
+
+        try:
+            step_open_hotels(page)
+            step_login(page)
+            step_goto_hotels_after_login(page)
+            city = step_search_city(page)
+            step_set_dates(page)
+            step_set_adults(page)
+            step_search(page)
+            step_check_listings(page)
+            step_view_more(page)
+            hotel_page = step_view_rooms(page)
+            step_book_now(hotel_page)
+            total_traveller = step_read_grand_total(hotel_page, "Traveller Page")
+            step_fill_traveller(hotel_page)
+            payment_page = step_continue_booking(hotel_page)
+            total_checkout = step_read_grand_total(payment_page, "Checkout Page")
+
+            def norm(s):
+                return re.sub(r'[^\d]', '', s or '')
+
+            if norm(total_traveller) and norm(total_checkout):
+                if norm(total_traveller) == norm(total_checkout):
+                    print(f"[PASS] Traveller == Checkout: {total_traveller}")
+                else:
+                    print(f"[FAIL] Traveller vs Checkout MISMATCH: {total_traveller} != {total_checkout}")
+            else:
+                print(f"⚠️ Grand Total comparison skipped — Traveller: {total_traveller}, Checkout: {total_checkout}")
+
+            # Use checkout total as the expected amount on OTP page
+            expected_for_otp = total_checkout if norm(total_checkout) else total_traveller
+
+            step_select_credit_card(payment_page)
+            step_fill_card(payment_page)
+            step_make_payment(payment_page)
+            step_otp_page(payment_page, expected_total=expected_for_otp)
+            booking_id = step_capture_booking_id(payment_page)
+
+            print("\n" + "=" * 65)
+            print("✅ AUTOMATION COMPLETE")
+            if booking_id:
+                print(f"   Booking ID : {booking_id}")
+            print(f"   City       : {city}")
+            print(f"   Dates      : {CHECKIN_STR} → {CHECKOUT_STR}")
+            print(f"   Adults     : {ADULTS}")
+            print("=" * 65)
+
+        except RuntimeError as e:
+            print(f"\n❌ FAILED: {e}")
+            save_screenshot(hotel_page if hotel_page else page, "failure_us")
+        except Exception as e:
+            import traceback
+            print(f"\n❌ UNEXPECTED ERROR: {e}")
+            traceback.print_exc()
+            save_screenshot(hotel_page if hotel_page else page, "failure_us")
+        finally:
+            browser.close()
+
+
+if __name__ == "__main__":
+    automate_easemytrip_us()
